@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<title>Plagiarism_N_AI_Detector</title>
+
+<style>
+
+body{
+font-family:Arial;
+text-align:center;
+background:#f4f4f4;
+}
+
+.container{
+margin:auto;
+margin-top:80px;
+width:500px;
+padding:30px;
+background:white;
+border-radius:10px;
+box-shadow:0px 0px 10px gray;
+}
+
+button{
+padding:10px 20px;
+font-size:16px;
+background:blue;
+color:white;
+border:none;
+border-radius:5px;
+cursor:pointer;
+}
+
+input{
+margin:10px;
+}
+
+.result{
+margin-top:20px;
+font-size:18px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<h2>Plagiarism_N_AI_Detector</h2>
+
+<form action="/predict" method="post" enctype="multipart/form-data">
+
+<p>Upload Reference Document(s)</p>
+
+<input type="file" name="reference" multiple required>
+
+<p>Upload User Document</p>
+
+<input type="file" name="user" required>
+
+<br><br>
+
+<button type="submit">Check</button>
+
+</form>
+
+{% if plag %}
+
+<div class="result">
+
+<hr>
+
+<p><b>Plagiarism:</b> {{plag}}</p>
+
+<p><b>AI Detection:</b> {{ai}}</p>
+
+<p><b>Similarity Score:</b> {{similarity}}%</p>
+
+<p><b>AI Probability:</b> {{percent}}%</p>
+
+<p><b>Final Result:</b> {{final}}</p>
+
+<br>
+
+<a href="/download">
+<button>Download Detailed Report</button>
+</a>
+
+</div>
+
+{% endif %}
+
+</div>
+
+</body>
+</html>
