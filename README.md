@@ -11,6 +11,7 @@ The application provides a **web interface built with Flask**, allowing users to
 
 ---
 
+
 ## Features
 
 ### 1. Plagiarism Detection
