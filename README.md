@@ -1,6 +1,5 @@
 # A Classical and Deep Learning-Based NLP System for Plagiarism and AI Text Detection
 
-
 ## Overview
 
 This project presents an intelligent plagiarism detection system that analyzes a user-submitted document and compares it with reference documents to detect textual similarity and determine whether the content is original, plagiarized, or AI-generated.
