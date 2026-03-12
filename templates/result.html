@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+<title>Results</title>
+
+<style>
+
+body{
+font-family:Arial;
+background:#f2f2f2;
+}
+
+.container{
+width:900px;
+margin:auto;
+margin-top:40px;
+background:white;
+padding:30px;
+border-radius:10px;
+}
+
+.result-box{
+padding:15px;
+border-radius:8px;
+color:white;
+font-size:18px;
+font-weight:bold;
+margin-top:10px;
+text-align:center;
+}
+
+/* RESULT COLORS */
+
+.original{
+background:#2ecc71;
+}
+
+.human{
+background:#3498db;
+}
+
+.ai{
+background:#f39c12;
+}
+
+.plag{
+background:#e74c3c;
+}
+
+table{
+width:100%;
+border-collapse:collapse;
+margin-top:20px;
+}
+
+td,th{
+border:1px solid gray;
+padding:8px;
+}
+
+.high{background:#ffb3b3;}
+.medium{background:#ffd9b3;}
+.low{background:#b3ffcc;}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<h2>Detection Results</h2>
+
+<p><b>Similarity Score:</b> {{similarity}}%</p>
+
+
+
+<!-- FINAL RESULT BOX -->
+
+{% if "Plagiarized" in final %}
+<div class="result-box plag">
+{{final}}
+</div>
+
+{% elif "Human" in final %}
+<div class="result-box human">
+{{final}}
+</div>
+
+{% elif "AI" in final %}
+<div class="result-box ai">
+{{final}}
+</div>
+
+{% else %}
+<div class="result-box original">
+{{final}}
+</div>
+{% endif %}
+
+<h3>Source Contribution</h3>
+
+<table>
+
+<tr>
+<th>Document</th>
+<th>Matches</th>
+</tr>
+
+{% for k,v in sources.items() %}
+
+<tr>
+<td>{{k}}</td>
+<td>{{v}}</td>
+</tr>
+
+{% endfor %}
+
+</table>
+
+<h3>Sentence Comparison</h3>
+
+<table>
+
+<tr>
+<th>User Sentence</th>
+<th>Reference Sentence</th>
+<th>Similarity</th>
+<th>Source</th>
+</tr>
+
+{% for m in matches %}
+
+<tr class="{% if m.similarity > 80 %}high{% elif m.similarity > 60 %}medium{% else %}low{% endif %}">
+
+<td>{{m.user}}</td>
+<td>{{m.reference}}</td>
+<td>{{m.similarity}}%</td>
+<td>{{m.source}}</td>
+
+</tr>
+
+{% endfor %}
+
+</table>
+
+<br>
+
+<a href="/download">
+<button>Download PDF Report</button>
+</a>
+
+</div>
+
+</body>
+</html>

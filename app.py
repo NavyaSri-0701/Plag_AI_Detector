@@ -1,157 +1,307 @@
 from flask import Flask, render_template, request, send_file
 import joblib
 import re
+import PyPDF2
+import numpy as np
+import difflib
+import faiss
+
+from docx import Document
 from sentence_transformers import SentenceTransformer
 
-# Swagger
-from flasgger import Swagger
-
-# PDF
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
 
 app = Flask(__name__)
-swagger = Swagger(app)
 
 # =============================
 # LOAD MODELS
 # =============================
 
-classifier = joblib.load("plagiarism_classifier.pkl")
-tfidf_vectorizer = joblib.load("tfidf_vectorizer.pkl")
-
 ai_model = joblib.load("ai_detector.pkl")
 ai_vectorizer = joblib.load("ai_vectorizer.pkl")
 
 embedding_model = SentenceTransformer(
-    "sentence-transformers/all-mpnet-base-v2"
+    "sentence-transformers/all-MiniLM-L6-v2"
 )
 
 # =============================
-# FUNCTIONS
+# IGNORE HEADERS
+# =============================
+
+IGNORE_PHRASES = [
+"references","bibliography","acknowledgment","acknowledgement",
+"introduction","conclusion","abstract","keywords",
+"results","method","methods","discussion"
+]
+
+# =============================
+# REMOVE REFERENCES SECTION
+# =============================
+
+def remove_references(text):
+
+    text_lower = text.lower()
+
+    if "references" in text_lower:
+        index = text_lower.find("references")
+        text = text[:index]
+
+    return text
+
+# =============================
+# VALID SENTENCE FILTER
+# =============================
+
+def is_valid_sentence(sentence):
+
+    s = sentence.lower().strip()
+
+    if len(s) < 30:
+        return False
+
+    digits = sum(c.isdigit() for c in s)
+
+    if digits > len(s)*0.4:
+        return False
+
+    for phrase in IGNORE_PHRASES:
+        if phrase in s:
+            return False
+
+    if re.search(r'\[\d+\]', s):
+        return False
+
+    return True
+
+# =============================
+# TEXT EXTRACTION
+# =============================
+
+def extract_text(file):
+
+    filename = file.filename.lower()
+
+    if filename.endswith(".txt"):
+        return file.read().decode("utf-8", errors="ignore")
+
+    elif filename.endswith(".pdf"):
+
+        reader = PyPDF2.PdfReader(file)
+        text=""
+
+        for page in reader.pages:
+            content=page.extract_text()
+            if content:
+                text+=content
+
+        return text
+
+    elif filename.endswith(".docx"):
+
+        doc=Document(file)
+        text=""
+
+        for para in doc.paragraphs:
+            text+=para.text+" "
+
+        return text
+
+    return ""
+
+# =============================
+# SPLIT SENTENCES
 # =============================
 
 def split_sentences(text):
 
     sentences = re.split(r'[.!?]+', text)
 
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    sentences = [
+        s.strip() for s in sentences
+        if is_valid_sentence(s)
+    ]
 
     return sentences
 
+# =============================
+# WORD HIGHLIGHTING
+# =============================
 
-def calculate_similarity(ref_text, user_text):
+def highlight_text(user_sentence, ref_sentence):
 
-    v1 = tfidf_vectorizer.transform([ref_text])
-    v2 = tfidf_vectorizer.transform([user_text])
+    user_words=user_sentence.split()
+    ref_words=ref_sentence.split()
 
-    sim = (v1 * v2.T).toarray()[0][0]
+    matcher=difflib.SequenceMatcher(None,user_words,ref_words)
 
-    return round(sim * 100, 2)
+    hu=[]
+    hr=[]
 
+    for opcode,a1,a2,b1,b2 in matcher.get_opcodes():
 
-def check_continuous_match(ref, user):
+        if opcode=="equal":
 
-    continuous = 0
+            for w in user_words[a1:a2]:
+                hu.append(f'<b>{w}</b>')
 
-    for u in user:
-        for r in ref:
+            for w in ref_words[b1:b2]:
+                hr.append(f'<b>{w}</b>')
 
-            v1 = tfidf_vectorizer.transform([u])
-            v2 = tfidf_vectorizer.transform([r])
+        else:
 
-            sim = (v1 * v2.T).toarray()[0][0]
+            hu.extend(user_words[a1:a2])
+            hr.extend(ref_words[b1:b2])
 
-            if sim > 0.85:
+    return " ".join(hu)," ".join(hr)
 
-                continuous += 1
+# =============================
+# FAISS MATCHING
+# =============================
 
-                if continuous >= 6:
-                    return True
+def find_matching_sentences(ref_sent,user_sent,ref_sources):
 
-            else:
-                continuous = 0
+    matches=[]
 
-    return False
+    ref_emb=embedding_model.encode(ref_sent)
+    user_emb=embedding_model.encode(user_sent)
 
+    ref_emb=np.array(ref_emb).astype("float32")
+    user_emb=np.array(user_emb).astype("float32")
 
-def find_matching_sentences(ref, user):
+    dimension=ref_emb.shape[1]
 
-    matches = []
+    index=faiss.IndexFlatL2(dimension)
+    index.add(ref_emb)
 
-    for u in user:
-        for r in ref:
+    distances,indices=index.search(user_emb,5)
 
-            v1 = tfidf_vectorizer.transform([u])
-            v2 = tfidf_vectorizer.transform([r])
+    for i,user_sentence in enumerate(user_sent):
 
-            sim = (v1 * v2.T).toarray()[0][0]
+        best=None
+        best_score=0
 
-            if sim > 0.70:
-                matches.append((u, r, round(sim * 100, 2)))
+        for j in range(5):
+
+            ref_idx=indices[i][j]
+
+            sim=1/(1+distances[i][j])
+            sim_percent=round(sim*100,2)
+
+            if sim_percent>best_score:
+
+                best_score=sim_percent
+
+                best={
+                "user":user_sentence,
+                "reference":ref_sent[ref_idx],
+                "similarity":sim_percent,
+                "source":ref_sources[ref_idx]
+                }
+
+        if best and best_score>50:
+            matches.append(best)
 
     return matches
 
+# =============================
+# SOURCE CONTRIBUTION
+# =============================
+
+def source_statistics(matches):
+
+    stats={}
+
+    for m in matches:
+
+        src=m["source"]
+
+        if src not in stats:
+            stats[src]=0
+
+        stats[src]+=1
+
+    return stats
+
+# =============================
+# AI DETECTION
+# =============================
 
 def ai_percentage(text):
 
-    sentences = split_sentences(text)
+    sentences=split_sentences(text)
 
-    ai_count = 0
+    if len(sentences)==0:
+        return 0
+
+    ai_count=0
 
     for s in sentences:
 
-        vec = ai_vectorizer.transform([s])
+        vec=ai_vectorizer.transform([s])
+        pred=ai_model.predict(vec)[0]
 
-        pred = ai_model.predict(vec)[0]
+        if pred==1:
+            ai_count+=1
 
-        if pred == 1:
-            ai_count += 1
-
-    percent = (ai_count / len(sentences)) * 100
+    percent=(ai_count/len(sentences))*100
 
     return percent
 
+# =============================
+# PDF REPORT
+# =============================
 
-def generate_report(similarity, matches, ai_percent, final):
+def generate_report(similarity,matches,ai_percent,plag_percent,final):
 
-    file_path = "report.pdf"
+    styles=getSampleStyleSheet()
+    elements=[]
 
-    styles = getSampleStyleSheet()
+    elements.append(Paragraph("Plagiarism and AI Detection Report",styles['Title']))
+    elements.append(Spacer(1,20))
 
-    elements = []
+    summary=[
+    ["Metric","Value"],
+    ["Similarity Score",f"{similarity}%"],
+    ["Plagiarism Percentage",f"{plag_percent}%"],
+    ["AI Probability",f"{round(ai_percent,2)}%"],
+    ["Final Result",final]
+    ]
 
-    elements.append(Paragraph("Plagiarism and AI Detection Report", styles['Title']))
-    elements.append(Spacer(1, 20))
+    table=Table(summary)
 
-    elements.append(Paragraph(f"Similarity Score : {similarity} %", styles['Normal']))
-    elements.append(Paragraph(f"AI Probability : {round(ai_percent,2)} %", styles['Normal']))
-    elements.append(Paragraph(f"Final Result : {final}", styles['Normal']))
+    table.setStyle(TableStyle([
+    ('GRID',(0,0),(-1,-1),1,colors.black),
+    ('BACKGROUND',(0,0),(-1,0),colors.grey)
+    ]))
 
-    elements.append(Spacer(1, 20))
-    elements.append(Paragraph("Matching Sentences", styles['Heading2']))
-    elements.append(Spacer(1, 10))
+    elements.append(table)
+    elements.append(Spacer(1,20))
 
-    if len(matches) == 0:
+    for i,m in enumerate(matches):
 
-        elements.append(Paragraph("No matching sentences detected.", styles['Normal']))
+        hu,hr=highlight_text(m["user"],m["reference"])
 
-    else:
+        data=[
+        ["User Sentence","Reference Sentence"],
+        [Paragraph(hu,styles['Normal']),Paragraph(hr,styles['Normal'])]
+        ]
 
-        for u, r, sim in matches:
+        t=Table(data,colWidths=[250,250])
 
-            elements.append(Paragraph(f"<b>User:</b> {u}", styles['Normal']))
-            elements.append(Paragraph(f"<b>Reference:</b> {r}", styles['Normal']))
-            elements.append(Paragraph(f"Similarity: {sim}%", styles['Normal']))
-            elements.append(Spacer(1, 10))
+        t.setStyle(TableStyle([
+        ('GRID',(0,0),(-1,-1),1,colors.black),
+        ('BACKGROUND',(0,0),(-1,0),colors.lightgrey)
+        ]))
 
-    pdf = SimpleDocTemplate(file_path, pagesize=letter)
+        elements.append(Paragraph(f"Match {i+1} - {m['similarity']}%",styles['Normal']))
+        elements.append(t)
+        elements.append(Spacer(1,10))
 
+    pdf=SimpleDocTemplate("report.pdf",pagesize=letter)
     pdf.build(elements)
-
-    return file_path
-
 
 # =============================
 # ROUTES
@@ -159,124 +309,74 @@ def generate_report(similarity, matches, ai_percent, final):
 
 @app.route('/')
 def home():
-    """
-    Home Page
-    ---
-    responses:
-      200:
-        description: Web interface
-    """
     return render_template("index.html")
 
-
-@app.route('/predict', methods=['POST'])
+@app.route('/predict',methods=['POST'])
 def predict():
-    """
-    Plagiarism + AI Detection
-    ---
-    consumes:
-      - multipart/form-data
-    parameters:
-      - name: reference
-        in: formData
-        type: file
-        required: true
-        description: Reference document(s)
 
-      - name: user
-        in: formData
-        type: file
-        required: true
-        description: User document
+    ref_files=request.files.getlist('reference')
+    user_file=request.files['user']
 
-    responses:
-      200:
-        description: Detection results
-    """
+    user_text=extract_text(user_file)
+    user_text=remove_references(user_text)
 
-    ref_files = request.files.getlist('reference')
-
-    user_file = request.files['user']
-
-    user_text = user_file.read().decode('utf-8')
-
-    ref_texts = []
+    ref_sent=[]
+    ref_sources=[]
 
     for file in ref_files:
 
-        text = file.read().decode('utf-8')
+        text=extract_text(file)
+        text=remove_references(text)
 
-        ref_texts.append(text)
+        sentences=split_sentences(text)
 
-    combined_ref_text = " ".join(ref_texts)
+        for s in sentences:
+            ref_sent.append(s)
+            ref_sources.append(file.filename)
 
-    ref_sent = split_sentences(combined_ref_text)
+    user_sent=split_sentences(user_text)
 
-    user_sent = split_sentences(user_text)
+    matches=find_matching_sentences(ref_sent,user_sent,ref_sources)
 
-    plag = check_continuous_match(ref_sent, user_sent)
+    matched_users=set([m["user"] for m in matches])
 
-    similarity_score = calculate_similarity(combined_ref_text, user_text)
+    plag_percent=round((len(matched_users)/len(user_sent))*100,2) if user_sent else 0
 
-    matches = find_matching_sentences(ref_sent, user_sent)
+    similarity_score=round(
+    sum(m["similarity"] for m in matches)/len(matches),2
+    ) if matches else 0
 
-    ai_percent = ai_percentage(user_text)
+    ai_percent=ai_percentage(user_text)
 
-    if plag:
-        plag_result = "Plagiarized"
-    else:
-        plag_result = "Not Plagiarized"
+    source_stats=source_statistics(matches)
 
-    if ai_percent >= 42:
-        ai_result = "AI Generated"
-    else:
-        ai_result = "Human Written"
+    if plag_percent>25:
 
-    if plag and ai_percent >= 42:
-        final = "Plagiarized and Also AI Generated"
-
-    elif plag and ai_percent < 42:
-        final = "Plagiarized Human Text not AI Generated"
-
-    elif not plag and ai_percent >= 42:
-        final = "AI Generated and Not Plagiarised"
+        if ai_percent>42:
+            final="Plagiarized and AI Generated"
+        else:
+            final="Plagiarized Human Text"
 
     else:
-        final = "Original Human Text"
 
-    generate_report(
-        similarity_score,
-        matches,
-        ai_percent,
-        final
-    )
+        if ai_percent>42:
+            final="Original AI Text"
+        else:
+            final="Original Human Text"
+
+    generate_report(similarity_score,matches,ai_percent,plag_percent,final)
 
     return render_template(
-        "index.html",
-        plag=plag_result,
-        ai=ai_result,
-        percent=round(ai_percent, 2),
-        similarity=similarity_score,
-        final=final,
-        report=True
+    "result.html",
+    matches=matches,
+    sources=source_stats,
+    similarity=similarity_score,
+    final=final
     )
-
 
 @app.route('/download')
 def download():
-    """
-    Download Report
-    ---
-    responses:
-      200:
-        description: Download PDF report
-    """
-    return send_file("report.pdf", as_attachment=True)
+    return send_file("report.pdf",as_attachment=True)
 
-
-# =============================
-# RUN
-# =============================
-
-if __name__ == '__main__':
+if __name__=="__main__":
     app.run(debug=True)
